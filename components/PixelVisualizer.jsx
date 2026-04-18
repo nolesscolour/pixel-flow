@@ -996,19 +996,47 @@ export default function PixelVisualizer() {
   const handleDownloadPNG = useCallback(function () {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const filename = "pixel-flow-" + palette.toLowerCase() + "-" + flowMode.toLowerCase() + "-" + Date.now() + ".png";
+
     canvas.toBlob(function (blob) {
       if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.download = "pixel-flow-" + palette.toLowerCase() + "-" + flowMode.toLowerCase() + "-" + Date.now() + ".png";
-      link.href = url;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      setTimeout(function () { URL.revokeObjectURL(url); }, 200);
+
+      // Try native share sheet first (mobile, premium feel)
+      const isMobile = typeof navigator !== "undefined" && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+if (isMobile && navigator.canShare) {
+
+        try {
+          const file = new File([blob], filename, { type: "image/png" });
+          if (navigator.canShare({ files: [file] })) {
+            navigator.share({ files: [file], title: "Pixel Flow" }).catch(function () {
+              // User cancelled or share failed — fall through to download
+              triggerDownload(blob, filename);
+            });
+            setShowDownload(false);
+            return;
+          }
+        } catch (err) {
+          // Fall through to download
+        }
+      }
+
+      triggerDownload(blob, filename);
     }, "image/png");
     setShowDownload(false);
   }, [palette, flowMode]);
+
+  // Helper — desktop/fallback download
+  function triggerDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.download = filename;
+    link.href = url;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 200);
+  }
+
 
 
   // Download a self-contained JSX component with current settings baked in
