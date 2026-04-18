@@ -996,13 +996,20 @@ export default function PixelVisualizer() {
   const handleDownloadPNG = useCallback(function () {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const url = canvas.toDataURL("image/png");
-    const link = document.createElement("a");
-    link.download = "pixel-flow-" + palette.toLowerCase() + "-" + flowMode.toLowerCase() + "-" + Date.now() + ".png";
-    link.href = url;
-    link.click();
+    canvas.toBlob(function (blob) {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.download = "pixel-flow-" + palette.toLowerCase() + "-" + flowMode.toLowerCase() + "-" + Date.now() + ".png";
+      link.href = url;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 200);
+    }, "image/png");
     setShowDownload(false);
   }, [palette, flowMode]);
+
 
   // Download a self-contained JSX component with current settings baked in
   const handleDownloadCode = useCallback(function () {
