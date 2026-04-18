@@ -1185,7 +1185,7 @@ export default function PixelVisualizer() {
             <div className="pf-modal-header">
               <div>
                 <div className="pf-modal-title">PIXEL FLOW</div>
-                <div className="pf-modal-author">v2.1 · by YOUR NAME</div>
+                <div className="pf-modal-author">v2.1 · by ASHLEN SINGH</div>
               </div>
               <button onClick={function () { setShowInfo(false); }} className="pf-icon-btn" aria-label="Close">×</button>
             </div>
@@ -1210,14 +1210,14 @@ export default function PixelVisualizer() {
               </div>
 
               <div className="pf-modal-links">
-                <a href="https://twitter.com/YOUR_HANDLE" target="_blank" rel="noreferrer">Twitter</a>
-                <a href="https://YOUR_WEBSITE.com" target="_blank" rel="noreferrer">Website</a>
-                <a href="mailto:YOUR@EMAIL.com">Contact</a>
+                <a href="https://x.com/blehdezigner" target="_blank" rel="noreferrer">Twitter</a>
+                <a href="https://ashlendesign.framer.website/" target="_blank" rel="noreferrer">Website</a>
+                <a href="mailto:ashlenaloysishsingh@gmail.com">Contact</a>
               </div>
             </div>
 
             <div className="pf-modal-foot">
-              Inspired by Nigina's ASCII Graphic series.
+              Created by Ashlen Singh 2026.
             </div>
           </div>
         </div>
