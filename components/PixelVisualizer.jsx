@@ -113,6 +113,40 @@ function drawRoundRect(ctx, x, y, w, h, r) {
   }
 }
 
+// Draw a shape primitive at center (cx, cy) with size and roundness
+function drawShape(ctx, shape, cx, cy, size, roundness) {
+  const half = size / 2;
+  ctx.beginPath();
+  if (shape === "Circle") {
+    ctx.arc(cx, cy, half, 0, Math.PI * 2);
+  } else if (shape === "Diamond") {
+    ctx.moveTo(cx, cy - half);
+    ctx.lineTo(cx + half, cy);
+    ctx.lineTo(cx, cy + half);
+    ctx.lineTo(cx - half, cy);
+    ctx.closePath();
+  } else if (shape === "Triangle") {
+    const h = size * 0.866; // equilateral height
+    ctx.moveTo(cx, cy - h * 0.55);
+    ctx.lineTo(cx + half, cy + h * 0.45);
+    ctx.lineTo(cx - half, cy + h * 0.45);
+    ctx.closePath();
+  } else {
+    // Square (rounded)
+    const rr = Math.min(roundness, half);
+    if (ctx.roundRect) {
+      ctx.roundRect(cx - half, cy - half, size, size, rr);
+    } else {
+      ctx.moveTo(cx - half + rr, cy - half);
+      ctx.arcTo(cx + half, cy - half, cx + half, cy + half, rr);
+      ctx.arcTo(cx + half, cy + half, cx - half, cy + half, rr);
+      ctx.arcTo(cx - half, cy + half, cx - half, cy - half, rr);
+      ctx.arcTo(cx - half, cy - half, cx + half, cy - half, rr);
+      ctx.closePath();
+    }
+  }
+}
+
 /* ========================================================================
    PALETTES
    ======================================================================== */
@@ -124,20 +158,173 @@ const PALETTES = {
   "Moss":   { hex: ["#1B4332", "#2D6A4F", "#40916C", "#52B788", "#95D5B2", "#B7E4C7"], bg: "#040D08" },
   "Mono":   { hex: ["#FAFAFA", "#D0D0D0", "#A0A0A0", "#707070", "#E0E0E0", "#BDBDBD"], bg: "#050505" }
 };
+// Custom palette — editable by user, persisted to localStorage
+PALETTES["Custom"] = { hex: ["#7B2D8E", "#9B4DCA", "#E8735A", "#F4A261", "#F28482", "#D4A5FF"], bg: "#0A0714" };
+
 const PALETTE_NAMES = Object.keys(PALETTES);
 PALETTE_NAMES.forEach(function (name) {
   PALETTES[name].hsl = PALETTES[name].hex.map(hexToHsl);
 });
 
-const FLOW_NAMES = ["Waves", "Spiral", "Rain", "Breathe", "Chaos"];
-const INTERACTION_NAMES = ["Ripple", "Scatter", "Bloom", "Magnet", "Glow"];
+function rebuildCustomHsl() {
+  PALETTES["Custom"].hsl = PALETTES["Custom"].hex.map(hexToHsl);
+}
+
+// Extract N dominant colors from an image using median-cut quantization
+function extractPaletteFromImage(img, count) {
+  const canvas = document.createElement("canvas");
+  const size = 64;
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0, size, size);
+  const imgData = ctx.getImageData(0, 0, size, size).data;
+
+  // Build pixel array, skipping near-black/white edges and very desaturated pixels
+  const pixels = [];
+  for (let i = 0; i < imgData.length; i += 4) {
+    const r = imgData[i];
+    const g = imgData[i + 1];
+    const b = imgData[i + 2];
+    const a = imgData[i + 3];
+    if (a < 200) continue;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    if (max < 20 || min > 235) continue; // skip near-black / near-white
+    pixels.push([r, g, b]);
+  }
+  if (pixels.length === 0) return null;
+
+  // Median-cut: split into buckets recursively along widest axis
+  function bucketStats(bucket) {
+    let rMin = 255, rMax = 0, gMin = 255, gMax = 0, bMin = 255, bMax = 0;
+    for (let i = 0; i < bucket.length; i++) {
+      const p = bucket[i];
+      if (p[0] < rMin) rMin = p[0];
+      if (p[0] > rMax) rMax = p[0];
+      if (p[1] < gMin) gMin = p[1];
+      if (p[1] > gMax) gMax = p[1];
+      if (p[2] < bMin) bMin = p[2];
+      if (p[2] > bMax) bMax = p[2];
+    }
+    return { rRange: rMax - rMin, gRange: gMax - gMin, bRange: bMax - bMin };
+  }
+
+  function splitBucket(bucket) {
+    const stats = bucketStats(bucket);
+    let axis = 0;
+    if (stats.gRange > stats.rRange && stats.gRange > stats.bRange) axis = 1;
+    else if (stats.bRange > stats.rRange) axis = 2;
+    bucket.sort(function (a, b) { return a[axis] - b[axis]; });
+    const mid = Math.floor(bucket.length / 2);
+    return [bucket.slice(0, mid), bucket.slice(mid)];
+  }
+
+  let buckets = [pixels];
+  while (buckets.length < count) {
+    // Find the bucket with the widest range to split
+    let widestIdx = 0;
+    let widestRange = 0;
+    for (let i = 0; i < buckets.length; i++) {
+      if (buckets[i].length < 2) continue;
+      const s = bucketStats(buckets[i]);
+      const r = Math.max(s.rRange, s.gRange, s.bRange);
+      if (r > widestRange) {
+        widestRange = r;
+        widestIdx = i;
+      }
+    }
+    if (widestRange === 0) break;
+    const split = splitBucket(buckets[widestIdx]);
+    buckets.splice(widestIdx, 1, split[0], split[1]);
+  }
+
+  // Average each bucket → hex
+  const hexes = buckets.map(function (bucket) {
+    let r = 0, g = 0, b = 0;
+    for (let i = 0; i < bucket.length; i++) {
+      r += bucket[i][0];
+      g += bucket[i][1];
+      b += bucket[i][2];
+    }
+    r = Math.round(r / bucket.length);
+    g = Math.round(g / bucket.length);
+    b = Math.round(b / bucket.length);
+    return "#" + r.toString(16).padStart(2, "0") + g.toString(16).padStart(2, "0") + b.toString(16).padStart(2, "0");
+  });
+
+  // Pad to count if we got fewer (rare)
+  while (hexes.length < count) hexes.push(hexes[hexes.length - 1] || "#888888");
+
+  // Derive bg = darkest color, dimmed
+  const dark = hexes.slice().sort(function (a, b) {
+    const la = parseInt(a.slice(1, 3), 16) + parseInt(a.slice(3, 5), 16) + parseInt(a.slice(5, 7), 16);
+    const lb = parseInt(b.slice(1, 3), 16) + parseInt(b.slice(3, 5), 16) + parseInt(b.slice(5, 7), 16);
+    return la - lb;
+  })[0];
+  const dr = Math.round(parseInt(dark.slice(1, 3), 16) * 0.15);
+  const dg = Math.round(parseInt(dark.slice(3, 5), 16) * 0.15);
+  const db = Math.round(parseInt(dark.slice(5, 7), 16) * 0.15);
+  const bg = "#" + dr.toString(16).padStart(2, "0") + dg.toString(16).padStart(2, "0") + db.toString(16).padStart(2, "0");
+
+  return { colors: hexes.slice(0, count), bg: bg };
+}
+
+const FLOW_NAMES = ["Waves", "Spiral", "Rain", "Breathe", "Chaos", "Vortex", "Pulse", "Drift"];
+const INTERACTION_NAMES = ["Ripple", "Scatter", "Bloom", "Magnet", "Glow", "Repel", "Trail"];
 const RENDER_NAMES = ["Grid", "Stipple", "Hybrid"];
+const SHAPE_NAMES = ["Square", "Circle", "Diamond", "Triangle"];
 
 // Fast deterministic pseudo-random from integer coords (for stable stipple positions)
 function hash2(a, b) {
   let h = Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263);
   h = Math.imul(h ^ (h >>> 13), 1274126177);
   return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+}
+
+/* ========================================================================
+   PRESETS — Curated combos
+   ======================================================================== */
+const PRESETS = [
+  { name: "Nigina Dusk",   palette: "Dusk",   flowMode: "Waves",   interaction: "Ripple",  renderMode: "Stipple", pixelSize: 14, gap: 3, roundness: 4, speed: 1.0, showDot: false, trails: false },
+  { name: "Cyber Rain",    palette: "Cyber",  flowMode: "Rain",    interaction: "Glow",    renderMode: "Grid",    pixelSize: 12, gap: 2, roundness: 3, speed: 1.4, showDot: true,  trails: false },
+  { name: "Ocean Breath",  palette: "Ocean",  flowMode: "Breathe", interaction: "Bloom",   renderMode: "Hybrid",  pixelSize: 16, gap: 4, roundness: 8, speed: 0.8, showDot: true,  trails: false },
+  { name: "Ember Chaos",   palette: "Ember",  flowMode: "Chaos",   interaction: "Scatter", renderMode: "Grid",    pixelSize: 10, gap: 2, roundness: 2, speed: 1.6, showDot: false, trails: true  },
+  { name: "Moss Spiral",   palette: "Moss",   flowMode: "Spiral",  interaction: "Magnet",  renderMode: "Stipple", pixelSize: 14, gap: 3, roundness: 6, speed: 1.0, showDot: false, trails: false },
+  { name: "Mono Trails",   palette: "Mono",   flowMode: "Chaos",   interaction: "Scatter", renderMode: "Grid",    pixelSize: 8,  gap: 1, roundness: 2, speed: 1.2, showDot: false, trails: true  }
+];
+
+function encodeStateToURL(state) {
+  const params = new URLSearchParams();
+  params.set("p", state.palette);
+  params.set("f", state.flowMode);
+  params.set("i", state.interaction);
+  params.set("r", state.renderMode);
+  params.set("s", state.pixelSize);
+  params.set("g", state.gap);
+  params.set("rd", state.roundness);
+  params.set("sp", state.speed);
+  params.set("d", state.showDot ? "1" : "0");
+  params.set("t", state.trails ? "1" : "0");
+  return params.toString();
+}
+
+function decodeStateFromURL() {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has("p")) return null;
+  return {
+    palette: params.get("p"),
+    flowMode: params.get("f"),
+    interaction: params.get("i"),
+    renderMode: params.get("r"),
+    pixelSize: parseInt(params.get("s")) || 14,
+    gap: parseInt(params.get("g")) || 3,
+    roundness: parseInt(params.get("rd")) || 4,
+    speed: parseFloat(params.get("sp")) || 1,
+    showDot: params.get("d") === "1",
+    trails: params.get("t") === "1"
+  };
 }
 
 /* ========================================================================
@@ -195,7 +382,35 @@ const FLOW_TEMPLATES = {
           colorT = n1 * 0.8 + t * 0.04;
           scale = 0.2 + (n2 * 0.5 + 0.5) * 1.3;
           offX = noise.noise2D(col * 0.2 + t * 0.5, row * 0.2) * 22;
-          offY = noise.noise2D(col * 0.2, row * 0.2 + t * 0.5) * 22;`
+          offY = noise.noise2D(col * 0.2, row * 0.2 + t * 0.5) * 22;`,
+  "Vortex": `          const dxC = origX - cx, dyC = origY - cy;
+          const dist = Math.hypot(dxC, dyC);
+          const ang = Math.atan2(dyC, dxC);
+          const swirlStrength = Math.max(0, 1 - dist / maxDist);
+          const swirlAng = ang + swirlStrength * 4 + t * 1.4;
+          scale = 0.25 + swirlStrength * 1.05 + Math.sin(dist * 0.04 - t * 2) * 0.3;
+          colorT = swirlAng / (Math.PI * 2) - t * 0.08;
+          const swirlPush = swirlStrength * 18;
+          offX = Math.cos(swirlAng) * swirlPush;
+          offY = Math.sin(swirlAng) * swirlPush;`,
+  "Pulse": `          const dxC = origX - cx, dyC = origY - cy;
+          const dist = Math.hypot(dxC, dyC);
+          const distNorm = dist / maxDist;
+          const beat1 = Math.sin(t * 2.4 - distNorm * 6) * 0.5 + 0.5;
+          const beat2 = Math.sin(t * 4.8 - distNorm * 12) * 0.3;
+          scale = 0.18 + beat1 * 1.1 + beat2 * 0.4;
+          colorT = distNorm * 1.2 - t * 0.15 + beat1 * 0.2;
+          const dd = dist || 1;
+          const radial = beat1 * 12;
+          offX = (dxC / dd) * radial;
+          offY = (dyC / dd) * radial;`,
+  "Drift": `          const drift1 = noise.noise3D(col * 0.05, row * 0.05, t * 0.15);
+          const drift2 = noise.noise3D(col * 0.05 + 100, row * 0.05 + 100, t * 0.15);
+          const flow = noise.noise2D(col * 0.04 + t * 0.1, row * 0.04 - t * 0.08);
+          scale = 0.35 + (flow * 0.5 + 0.5) * 0.85;
+          colorT = drift1 * 0.6 + t * 0.02;
+          offX = drift1 * 18;
+          offY = drift2 * 18;`
 };
 
 const INTERACTION_TEMPLATES = {
@@ -218,7 +433,17 @@ const INTERACTION_TEMPLATES = {
               lightShift += eased * 12;`,
   "Glow": `              lightShift = eased * 42;
               satShift = eased * 15;
-              scale *= (1 + eased * 0.28);`
+              scale *= (1 + eased * 0.28);`,
+  "Repel": `              const push = eased * 75;
+              px += (mdx / dd) * push;
+              py += (mdy / dd) * push;
+              scale *= (1 - eased * 0.3);
+              lightShift -= eased * 15;`,
+  "Trail": `              hueShift += eased * 60;
+              lightShift += eased * 50;
+              satShift += eased * 25;
+              scale *= (1 + eased * 0.45);
+              colorT += eased * 0.3;`
 };
 
 const CLICK_BURST_TEMPLATES = {
@@ -240,7 +465,17 @@ const CLICK_BURST_TEMPLATES = {
                 lightShift += eF * 15;`,
   "Glow": `                lightShift += eF * 55;
                 satShift += eF * 20;
-                scale += eF * 0.7;`
+                scale += eF * 0.7;`,
+  "Repel": `                const push = eF * 110;
+                px += (cdx / dd) * push;
+                py += (cdy / dd) * push;
+                scale += eF * 0.4;
+                lightShift -= eF * 18;`,
+  "Trail": `                hueShift += eF * 90;
+                lightShift += eF * 60;
+                satShift += eF * 30;
+                scale += eF * 0.8;
+                colorT += eF * 0.4;`
 };
 
 const RENDER_TEMPLATES = {
@@ -617,10 +852,24 @@ export default function PixelVisualizer() {
   const [showInfo, setShowInfo] = useState(false);
   const [showDownload, setShowDownload] = useState(false);
   const [codeCursor, setCodeCursor] = useState(true);
+  const [tiltEnabled, setTiltEnabled] = useState(false);
+  const [tiltNeedsPermission, setTiltNeedsPermission] = useState(false);
+  const [trails, setTrails] = useState(false);
+  const [audioEnabled, setAudioEnabled] = useState(false);
+  const [audioError, setAudioError] = useState("");
+  const [shape, setShape] = useState("Square");
+  const [showPresets, setShowPresets] = useState(false);
+  const [shareLinkCopied, setShareLinkCopied] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordProgress, setRecordProgress] = useState(0);
+  const [showCustomPalette, setShowCustomPalette] = useState(false);
+  const [customColors, setCustomColors] = useState(["#7B2D8E", "#9B4DCA", "#E8735A", "#F4A261", "#F28482", "#D4A5FF"]);
+  const [customBg, setCustomBg] = useState("#0A0714");
 
   const canvasRef = useRef(null);
   const noiseRef = useRef(new SimplexNoise());
-  const mouseRef = useRef({ x: -9999, y: -9999, active: false, clicks: [] });
+  const mouseRef = useRef({ x: -9999, y: -9999, active: false, clicks: [], touches: [] });
+
   const stateRef = useRef({
     palette: "Dusk", flowMode: "Waves", interaction: "Ripple",
     pixelSize: 14, gap: 3, roundness: 4, speed: 1,
@@ -631,8 +880,23 @@ export default function PixelVisualizer() {
   const loadStartRef = useRef(0);
   const lastAutoRippleRef = useRef(0);
   const rafRef = useRef(null);
+const tiltRef = useRef({ x: 0, y: 0, enabled: false });
+  const audioRef = useRef({ enabled: false, bass: 0, mid: 0, high: 0, level: 0, analyser: null, dataArray: null, ctx: null, stream: null });
+  const paletteTransitionRef = useRef({ from: null, to: null, startTime: 0, duration: 700, active: false });
+  const prevPaletteRef = useRef("Dusk");
 
   useEffect(function () {
+    // Trigger crossfade when palette changes
+    if (prevPaletteRef.current !== palette) {
+      paletteTransitionRef.current = {
+        from: prevPaletteRef.current,
+        to: palette,
+        startTime: performance.now(),
+        duration: 700,
+        active: true
+      };
+      prevPaletteRef.current = palette;
+    }
     stateRef.current.palette = palette;
     stateRef.current.flowMode = flowMode;
     stateRef.current.interaction = interaction;
@@ -642,7 +906,9 @@ export default function PixelVisualizer() {
     stateRef.current.speed = speed;
     stateRef.current.renderMode = renderMode;
     stateRef.current.showDot = showDot;
-  }, [palette, flowMode, interaction, pixelSize, gap, roundness, speed, renderMode, showDot]);
+    stateRef.current.trails = trails;
+    stateRef.current.shape = shape;
+  }, [palette, flowMode, interaction, pixelSize, gap, roundness, speed, renderMode, showDot, trails, shape]);
 
   useEffect(function () {
     const canvas = canvasRef.current;
@@ -671,7 +937,10 @@ export default function PixelVisualizer() {
       mouseRef.current.y = touch.clientY - rect.top;
       mouseRef.current.active = true;
     };
-    const handleLeave = function () { mouseRef.current.active = false; };
+    const handleLeave = function () {
+      mouseRef.current.active = false;
+      mouseRef.current.touches = [];
+    };
     const handleClick = function (e) {
       const rect = canvas.getBoundingClientRect();
       const touch = e.touches ? e.touches[0] : e;
@@ -681,15 +950,46 @@ export default function PixelVisualizer() {
         time: timeRef.current,
         mode: stateRef.current.interaction
       });
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        navigator.vibrate(8);
+      }
     };
+
     const handleTouchStart = function (e) {
       if (e.cancelable) e.preventDefault();
-      handleMove(e);
-      handleClick(e);
+      const rect = canvas.getBoundingClientRect();
+      const t0 = e.touches[0];
+      mouseRef.current.x = t0.clientX - rect.left;
+      mouseRef.current.y = t0.clientY - rect.top;
+      mouseRef.current.active = true;
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const tc = e.changedTouches[i];
+        mouseRef.current.clicks.push({
+          x: tc.clientX - rect.left,
+          y: tc.clientY - rect.top,
+          time: timeRef.current,
+          mode: stateRef.current.interaction
+        });
+      }
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        navigator.vibrate(8);
+      }
     };
     const handleTouchMove = function (e) {
       if (e.cancelable) e.preventDefault();
-      handleMove(e);
+      const rect = canvas.getBoundingClientRect();
+      mouseRef.current.touches = [];
+      for (let i = 0; i < e.touches.length; i++) {
+        const tc = e.touches[i];
+        mouseRef.current.touches.push({
+          x: tc.clientX - rect.left,
+          y: tc.clientY - rect.top
+        });
+      }
+      const t0 = e.touches[0];
+      mouseRef.current.x = t0.clientX - rect.left;
+      mouseRef.current.y = t0.clientY - rect.top;
+      mouseRef.current.active = true;
     };
 
     canvas.addEventListener("mousemove", handleMove);
@@ -712,7 +1012,38 @@ export default function PixelVisualizer() {
       const t = timeRef.current;
 
       const elapsed = (now - loadStartRef.current) / 1000;
-      const pal = PALETTES[s.palette];
+      let pal = PALETTES[s.palette];
+      // Palette crossfade
+      const trans = paletteTransitionRef.current;
+      if (trans.active) {
+        const elapsedTrans = (now - trans.startTime) / trans.duration;
+        if (elapsedTrans >= 1) {
+          trans.active = false;
+        } else {
+          // Smooth easing
+          const tt = elapsedTrans * elapsedTrans * (3 - 2 * elapsedTrans);
+          const fromPal = PALETTES[trans.from];
+          const toPal = PALETTES[trans.to];
+          // Interpolate HSL values
+          const blendedHsl = fromPal.hsl.map(function (h, i) {
+            const f = h;
+            const t = toPal.hsl[i % toPal.hsl.length];
+            let dh = t[0] - f[0];
+            if (dh > 180) dh -= 360;
+            if (dh < -180) dh += 360;
+            return [f[0] + dh * tt, f[1] + (t[1] - f[1]) * tt, f[2] + (t[2] - f[2]) * tt];
+          });
+          // Interpolate bg
+          const fromBg = fromPal.bg, toBg = toPal.bg;
+          const fr = parseInt(fromBg.slice(1, 3), 16), fg = parseInt(fromBg.slice(3, 5), 16), fb = parseInt(fromBg.slice(5, 7), 16);
+          const tr = parseInt(toBg.slice(1, 3), 16), tg = parseInt(toBg.slice(3, 5), 16), tb = parseInt(toBg.slice(5, 7), 16);
+          const br = Math.round(fr + (tr - fr) * tt);
+          const bg = Math.round(fg + (tg - fg) * tt);
+          const bb = Math.round(fb + (tb - fb) * tt);
+          const blendedBg = "#" + br.toString(16).padStart(2, "0") + bg.toString(16).padStart(2, "0") + bb.toString(16).padStart(2, "0");
+          pal = { hsl: blendedHsl, bg: blendedBg };
+        }
+      }
       const mouse = mouseRef.current;
       const step = s.pixelSize + s.gap;
       const cols = Math.ceil(w / step) + 1;
@@ -734,7 +1065,38 @@ export default function PixelVisualizer() {
 
       mouse.clicks = mouse.clicks.filter(function (c) { return t - c.time < 3.5; });
 
-      ctx.fillStyle = pal.bg;
+      // Sample audio frequencies once per frame
+      const audioState = audioRef.current;
+      if (audioState.enabled && audioState.analyser && audioState.dataArray) {
+        audioState.analyser.getByteFrequencyData(audioState.dataArray);
+        const data = audioState.dataArray;
+        const len = data.length;
+        const bassEnd = Math.floor(len * 0.08);
+        const midEnd = Math.floor(len * 0.4);
+        let bassSum = 0, midSum = 0, highSum = 0;
+        for (let i = 0; i < bassEnd; i++) bassSum += data[i];
+        for (let i = bassEnd; i < midEnd; i++) midSum += data[i];
+        for (let i = midEnd; i < len; i++) highSum += data[i];
+        const bassAvg = bassSum / Math.max(1, bassEnd) / 255;
+        const midAvg = midSum / Math.max(1, midEnd - bassEnd) / 255;
+        const highAvg = highSum / Math.max(1, len - midEnd) / 255;
+        // Smooth
+        audioState.bass = audioState.bass * 0.6 + bassAvg * 0.4;
+        audioState.mid = audioState.mid * 0.6 + midAvg * 0.4;
+        audioState.high = audioState.high * 0.6 + highAvg * 0.4;
+        audioState.level = (audioState.bass + audioState.mid + audioState.high) / 3;
+      }
+
+      if (s.trails) {
+        // Paint semi-transparent bg = trails fade gradually
+        const bgHex = pal.bg;
+        const r = parseInt(bgHex.slice(1, 3), 16);
+        const g = parseInt(bgHex.slice(3, 5), 16);
+        const b = parseInt(bgHex.slice(5, 7), 16);
+        ctx.fillStyle = "rgba(" + r + "," + g + "," + b + ",0.15)";
+      } else {
+        ctx.fillStyle = pal.bg;
+      }
       ctx.fillRect(0, 0, w, h);
 
       for (let row = 0; row < rows; row++) {
@@ -800,16 +1162,64 @@ export default function PixelVisualizer() {
             scale = 0.2 + (n2 * 0.5 + 0.5) * 1.3;
             offX = noise.noise2D(col * 0.2 + t * 0.5, row * 0.2) * 22;
             offY = noise.noise2D(col * 0.2, row * 0.2 + t * 0.5) * 22;
+          } else if (s.flowMode === "Vortex") {
+            const dxC = origX - cx, dyC = origY - cy;
+            const dist = Math.hypot(dxC, dyC);
+            const ang = Math.atan2(dyC, dxC);
+            const swirlStrength = Math.max(0, 1 - dist / maxDist);
+            const swirlAng = ang + swirlStrength * 4 + t * 1.4;
+            scale = 0.25 + swirlStrength * 1.05 + Math.sin(dist * 0.04 - t * 2) * 0.3;
+            colorT = swirlAng / (Math.PI * 2) - t * 0.08;
+            const swirlPush = swirlStrength * 18;
+            offX = Math.cos(swirlAng) * swirlPush;
+            offY = Math.sin(swirlAng) * swirlPush;
+          } else if (s.flowMode === "Pulse") {
+            const dxC = origX - cx, dyC = origY - cy;
+            const dist = Math.hypot(dxC, dyC);
+            const distNorm = dist / maxDist;
+            const beat1 = Math.sin(t * 2.4 - distNorm * 6) * 0.5 + 0.5;
+            const beat2 = Math.sin(t * 4.8 - distNorm * 12) * 0.3;
+            scale = 0.18 + beat1 * 1.1 + beat2 * 0.4;
+            colorT = distNorm * 1.2 - t * 0.15 + beat1 * 0.2;
+            const dd = dist || 1;
+            const radial = beat1 * 12;
+            offX = (dxC / dd) * radial;
+            offY = (dyC / dd) * radial;
+          } else if (s.flowMode === "Drift") {
+            const drift1 = noise.noise3D(col * 0.05, row * 0.05, t * 0.15);
+            const drift2 = noise.noise3D(col * 0.05 + 100, row * 0.05 + 100, t * 0.15);
+            const flow = noise.noise2D(col * 0.04 + t * 0.1, row * 0.04 - t * 0.08);
+            scale = 0.35 + (flow * 0.5 + 0.5) * 0.85;
+            colorT = drift1 * 0.6 + t * 0.02;
+            offX = drift1 * 18;
+            offY = drift2 * 18;
           }
 
-          let px = origX + offX;
-          let py = origY + offY;
+          const tilt = tiltRef.current;
+          const tiltOffX = tilt.enabled ? tilt.x * 30 : 0;
+          const tiltOffY = tilt.enabled ? tilt.y * 30 : 0;
+          let px = origX + offX + tiltOffX;
+          let py = origY + offY + tiltOffY;
 
-          // ====== HOVER INTERACTION ======
+          // ====== HOVER INTERACTION (multi-touch aware) ======
           let hueShift = 0, lightShift = 0, satShift = 0;
-          if (mouse.active) {
-            const mdx = origX - mouse.x;
-            const mdy = origY - mouse.y;
+
+          // Audio reactive — applied after shifts are declared
+          const audio = audioRef.current;
+          if (audio.enabled) {
+            scale += audio.bass * 0.6;
+            colorT += audio.high * 0.4;
+            lightShift += audio.mid * 25;
+            satShift += audio.high * 20;
+          }
+          const points = (mouse.touches && mouse.touches.length > 0)
+            ? mouse.touches
+            : (mouse.active ? [{ x: mouse.x, y: mouse.y }] : []);
+
+          for (let pi = 0; pi < points.length; pi++) {
+            const p = points[pi];
+            const mdx = origX - p.x;
+            const mdy = origY - p.y;
             const md = Math.hypot(mdx, mdy);
             const radius = 220;
             if (md < radius) {
@@ -827,9 +1237,9 @@ export default function PixelVisualizer() {
                 py += (mdy / dd) * push;
                 scale *= (1 + eased * 0.5);
               } else if (s.interaction === "Bloom") {
-                hueShift = eased * 180;
-                lightShift = eased * 25;
-                satShift = eased * 30;
+                hueShift += eased * 180;
+                lightShift += eased * 25;
+                satShift += eased * 30;
                 scale *= (1 + eased * 0.7);
               } else if (s.interaction === "Magnet") {
                 const pull = eased * 45;
@@ -838,9 +1248,21 @@ export default function PixelVisualizer() {
                 scale *= (1 + eased * 0.35);
                 lightShift += eased * 12;
               } else if (s.interaction === "Glow") {
-                lightShift = eased * 42;
-                satShift = eased * 15;
+                lightShift += eased * 42;
+                satShift += eased * 15;
                 scale *= (1 + eased * 0.28);
+              } else if (s.interaction === "Repel") {
+                const push = eased * 75;
+                px += (mdx / dd) * push;
+                py += (mdy / dd) * push;
+                scale *= (1 - eased * 0.3);
+                lightShift -= eased * 15;
+              } else if (s.interaction === "Trail") {
+                hueShift += eased * 60;
+                lightShift += eased * 50;
+                satShift += eased * 25;
+                scale *= (1 + eased * 0.45);
+                colorT += eased * 0.3;
               }
             }
           }
@@ -879,6 +1301,18 @@ export default function PixelVisualizer() {
                 lightShift += eF * 55;
                 satShift += eF * 20;
                 scale += eF * 0.7;
+              } else if (click.mode === "Repel") {
+                const push = eF * 110;
+                px += (cdx / dd) * push;
+                py += (cdy / dd) * push;
+                scale += eF * 0.4;
+                lightShift -= eF * 18;
+              } else if (click.mode === "Trail") {
+                hueShift += eF * 90;
+                lightShift += eF * 60;
+                satShift += eF * 30;
+                scale += eF * 0.8;
+                colorT += eF * 0.4;
               } else {
                 scale += eF * 1.0;
                 colorT += eF * 0.25;
@@ -919,7 +1353,7 @@ export default function PixelVisualizer() {
               const gridAlpha = rm === "Hybrid" ? 0.55 : 0.96;
 
               ctx.fillStyle = hslToRgba(finalH, finalS, finalL, gridAlpha);
-              drawRoundRect(ctx, rectX, rectY, size, size, rad);
+              drawShape(ctx, s.shape, centerX, centerY, size, rad);
               ctx.fill();
 
               if (s.showDot) {
@@ -1039,6 +1473,79 @@ if (isMobile && navigator.canShare) {
 
 
 
+  // Record canvas as 5-second WebM video loop
+  const handleRecordVideo = useCallback(function () {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (typeof MediaRecorder === "undefined") {
+      alert("Video recording isn't supported in this browser. Try Chrome, Edge, or Firefox.");
+      return;
+    }
+
+    // Pick best supported codec
+    const mimeTypes = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+    let mimeType = "";
+    for (let i = 0; i < mimeTypes.length; i++) {
+      if (MediaRecorder.isTypeSupported(mimeTypes[i])) {
+        mimeType = mimeTypes[i];
+        break;
+      }
+    }
+    if (!mimeType) {
+      alert("WebM recording not supported in this browser.");
+      return;
+    }
+
+    try {
+      const stream = canvas.captureStream(60);
+      const recorder = new MediaRecorder(stream, { mimeType: mimeType, videoBitsPerSecond: 8000000 });
+      const chunks = [];
+
+      recorder.ondataavailable = function (e) {
+        if (e.data && e.data.size > 0) chunks.push(e.data);
+      };
+
+      recorder.onstop = function () {
+        const blob = new Blob(chunks, { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.download = "pixel-flow-" + palette.toLowerCase() + "-" + flowMode.toLowerCase() + "-" + Date.now() + ".webm";
+        link.href = url;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 200);
+        setIsRecording(false);
+        setRecordProgress(0);
+        setShowDownload(false);
+      };
+
+      setIsRecording(true);
+      setRecordProgress(0);
+      recorder.start();
+
+      const startTime = performance.now();
+      const duration = 5000;
+
+      const tick = function () {
+        const elapsed = performance.now() - startTime;
+        const progress = Math.min(1, elapsed / duration);
+        setRecordProgress(progress);
+        if (progress < 1) {
+          requestAnimationFrame(tick);
+        } else {
+          recorder.stop();
+        }
+      };
+      requestAnimationFrame(tick);
+    } catch (err) {
+      console.error("Recording failed:", err);
+      setIsRecording(false);
+      setRecordProgress(0);
+      alert("Recording failed. Please try again.");
+    }
+  }, [palette, flowMode]);
+
   // Download a self-contained JSX component with current settings baked in
   const handleDownloadCode = useCallback(function () {
     const code = generateFramerComponent({
@@ -1063,6 +1570,219 @@ if (isMobile && navigator.canShare) {
     setShowDownload(false);
   }, [palette, flowMode, interaction, renderMode, showDot, pixelSize, gap, roundness, speed, codeCursor]);
 
+  // Load saved custom palette from localStorage
+  useEffect(function () {
+    if (typeof window === "undefined") return;
+    try {
+      const saved = window.localStorage.getItem("pf-custom-palette");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.colors && parsed.colors.length === 6) {
+          setCustomColors(parsed.colors);
+          PALETTES["Custom"].hex = parsed.colors.slice();
+        }
+        if (parsed.bg) {
+          setCustomBg(parsed.bg);
+          PALETTES["Custom"].bg = parsed.bg;
+        }
+        rebuildCustomHsl();
+      }
+    } catch (err) {}
+  }, []);
+
+  // Import palette from image
+  const handleImageImport = useCallback(function (e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function (event) {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = function () {
+        const result = extractPaletteFromImage(img, 6);
+        if (result) {
+          setCustomColors(result.colors);
+          setCustomBg(result.bg);
+          setPalette("Custom");
+        }
+      };
+      img.src = event.target.result;
+    };
+    reader.readAsDataURL(file);
+    // Reset input so re-uploading the same file works
+    e.target.value = "";
+  }, []);
+
+  // Sync custom palette changes to PALETTES + localStorage
+  useEffect(function () {
+    PALETTES["Custom"].hex = customColors.slice();
+    PALETTES["Custom"].bg = customBg;
+    rebuildCustomHsl();
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem("pf-custom-palette", JSON.stringify({ colors: customColors, bg: customBg }));
+      } catch (err) {}
+    }
+    // Trigger crossfade if Custom is currently active
+    if (palette === "Custom") {
+      paletteTransitionRef.current = {
+        from: "Custom",
+        to: "Custom",
+        startTime: performance.now(),
+        duration: 300,
+        active: true
+      };
+    }
+  }, [customColors, customBg, palette]);
+
+  // Load state from URL on mount
+  useEffect(function () {
+    const urlState = decodeStateFromURL();
+    if (urlState) {
+      if (urlState.palette && PALETTES[urlState.palette]) setPalette(urlState.palette);
+      if (urlState.flowMode && FLOW_NAMES.indexOf(urlState.flowMode) >= 0) setFlowMode(urlState.flowMode);
+      if (urlState.interaction && INTERACTION_NAMES.indexOf(urlState.interaction) >= 0) setInteraction(urlState.interaction);
+      if (urlState.renderMode && RENDER_NAMES.indexOf(urlState.renderMode) >= 0) setRenderMode(urlState.renderMode);
+      if (urlState.pixelSize) setPixelSize(urlState.pixelSize);
+      if (urlState.gap !== null) setGap(urlState.gap);
+      if (urlState.roundness !== null) setRoundness(urlState.roundness);
+      if (urlState.speed) setSpeed(urlState.speed);
+      setShowDot(urlState.showDot);
+      setTrails(urlState.trails);
+    }
+  }, []);
+
+  // Apply preset
+  const applyPreset = useCallback(function (preset) {
+    setPalette(preset.palette);
+    setFlowMode(preset.flowMode);
+    setInteraction(preset.interaction);
+    setRenderMode(preset.renderMode);
+    setPixelSize(preset.pixelSize);
+    setGap(preset.gap);
+    setRoundness(preset.roundness);
+    setSpeed(preset.speed);
+    setShowDot(preset.showDot);
+    setTrails(preset.trails);
+    setShowPresets(false);
+  }, []);
+
+  // Copy share link
+  const copyShareLink = useCallback(function () {
+    const queryString = encodeStateToURL({
+      palette: palette,
+      flowMode: flowMode,
+      interaction: interaction,
+      renderMode: renderMode,
+      pixelSize: pixelSize,
+      gap: gap,
+      roundness: roundness,
+      speed: speed,
+      showDot: showDot,
+      trails: trails
+    });
+    const url = window.location.origin + window.location.pathname + "?" + queryString;
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(url).then(function () {
+        setShareLinkCopied(true);
+        setTimeout(function () { setShareLinkCopied(false); }, 2000);
+      });
+    }
+  }, [palette, flowMode, interaction, renderMode, pixelSize, gap, roundness, speed, showDot, trails]);
+
+// Audio reactive
+  const enableAudio = useCallback(function () {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setAudioError("Microphone not supported");
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } })
+      .then(function (stream) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ctx = new AudioCtx();
+        const source = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 512;
+        analyser.smoothingTimeConstant = 0.78;
+        source.connect(analyser);
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+        audioRef.current.enabled = true;
+        audioRef.current.analyser = analyser;
+        audioRef.current.dataArray = dataArray;
+        audioRef.current.ctx = ctx;
+        audioRef.current.stream = stream;
+        setAudioEnabled(true);
+        setAudioError("");
+      })
+      .catch(function (err) {
+        console.error("Audio error:", err);
+        setAudioError("Mic permission denied");
+        setAudioEnabled(false);
+      });
+  }, []);
+
+  const disableAudio = useCallback(function () {
+    if (audioRef.current.stream) {
+      audioRef.current.stream.getTracks().forEach(function (t) { t.stop(); });
+    }
+    if (audioRef.current.ctx) {
+      audioRef.current.ctx.close().catch(function () {});
+    }
+    audioRef.current.enabled = false;
+    audioRef.current.analyser = null;
+    audioRef.current.dataArray = null;
+    audioRef.current.ctx = null;
+    audioRef.current.stream = null;
+    audioRef.current.bass = 0;
+    audioRef.current.mid = 0;
+    audioRef.current.high = 0;
+    audioRef.current.level = 0;
+    setAudioEnabled(false);
+  }, []);
+
+  // Gyroscope tilt
+  const enableTilt = useCallback(function () {
+    const handleOrientation = function (e) {
+      const beta = e.beta || 0;
+      const gamma = e.gamma || 0;
+      tiltRef.current.x = Math.max(-1, Math.min(1, gamma / 45));
+      tiltRef.current.y = Math.max(-1, Math.min(1, (beta - 30) / 45));
+      tiltRef.current.enabled = true;
+    };
+
+    if (typeof DeviceOrientationEvent !== "undefined" &&
+        typeof DeviceOrientationEvent.requestPermission === "function") {
+      DeviceOrientationEvent.requestPermission().then(function (response) {
+        if (response === "granted") {
+          window.addEventListener("deviceorientation", handleOrientation);
+          setTiltEnabled(true);
+        }
+      }).catch(function () {});
+    } else if (typeof window !== "undefined" && "DeviceOrientationEvent" in window) {
+      window.addEventListener("deviceorientation", handleOrientation);
+      setTiltEnabled(true);
+    }
+  }, []);
+
+  const disableTilt = useCallback(function () {
+    tiltRef.current.enabled = false;
+    tiltRef.current.x = 0;
+    tiltRef.current.y = 0;
+    setTiltEnabled(false);
+  }, []);
+
+  useEffect(function () {
+    if (typeof window === "undefined") return;
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    if (!isMobile) return;
+    if (typeof DeviceOrientationEvent !== "undefined" &&
+        typeof DeviceOrientationEvent.requestPermission === "function") {
+      setTiltNeedsPermission(true);
+    } else {
+      setTiltNeedsPermission(true);
+    }
+  }, []);
   const accentColor = PALETTES[palette].hex[0];
   const accentColor2 = PALETTES[palette].hex[2];
 
@@ -1088,6 +1808,14 @@ if (isMobile && navigator.canShare) {
               <line x1="12" y1="8" x2="12.01" y2="8" />
             </svg>
           </button>
+          <button onClick={function () { setShowPresets(true); }} className="pf-icon-btn" title="Presets" aria-label="Presets">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="7" height="7" />
+              <rect x="14" y="3" width="7" height="7" />
+              <rect x="3" y="14" width="7" height="7" />
+              <rect x="14" y="14" width="7" height="7" />
+            </svg>
+          </button>
           <button onClick={function () { setShowDownload(true); }} className="pf-icon-btn" title="Download" aria-label="Download">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -1095,6 +1823,20 @@ if (isMobile && navigator.canShare) {
               <line x1="12" y1="15" x2="12" y2="3" />
             </svg>
           </button>
+          {tiltNeedsPermission && (
+            <button
+              onClick={tiltEnabled ? disableTilt : enableTilt}
+              className={"pf-icon-btn" + (tiltEnabled ? " pf-icon-btn-active" : "")}
+              title={tiltEnabled ? "Disable Tilt" : "Enable Tilt"}
+              aria-label="Toggle Tilt"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="2" y1="12" x2="22" y2="12" />
+                <line x1="12" y1="2" x2="12" y2="22" />
+              </svg>
+            </button>
+          )}
           <button onClick={shuffle} className="pf-icon-btn" title="Shuffle" aria-label="Shuffle">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5" />
@@ -1115,7 +1857,13 @@ if (isMobile && navigator.canShare) {
                 return (
                   <button
                     key={name}
-                    onClick={function () { setPalette(name); }}
+                    onClick={function () {
+                      if (name === "Custom" && palette === "Custom") {
+                        setShowCustomPalette(true);
+                      } else {
+                        setPalette(name);
+                      }
+                    }}
                     className={"pf-pill" + (palette === name ? " active" : "")}
                   >
                     <span className="pf-swatches">
@@ -1123,7 +1871,7 @@ if (isMobile && navigator.canShare) {
                         return <span key={i} className="pf-swatch" style={{ background: c }} />;
                       })}
                     </span>
-                    <span>{name}</span>
+                    <span>{name}{name === "Custom" ? " ✎" : ""}</span>
                   </button>
                 );
               })}
@@ -1167,6 +1915,24 @@ if (isMobile && navigator.canShare) {
           </div>
 
           <div className="pf-section">
+            <div className="pf-label">Shape</div>
+            <div className="pf-row">
+              {SHAPE_NAMES.map(function (name) {
+                return (
+                  <button
+                    key={name}
+                    onClick={function () { setShape(name); }}
+                    className={"pf-pill" + (shape === name ? " active" : "")}
+                  >
+                    <span className="pf-pixel" style={shape === name ? { background: accentColor2, boxShadow: "0 0 10px " + accentColor2, borderRadius: name === "Circle" ? "50%" : (name === "Diamond" ? "0" : "3px"), transform: name === "Diamond" ? "rotate(45deg)" : "none" } : {}} />
+                    <span>{name}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="pf-section">
             <div className="pf-label">Render</div>
             <div className="pf-row">
               {RENDER_NAMES.map(function (name) {
@@ -1192,6 +1958,22 @@ if (isMobile && navigator.canShare) {
               >
                 <span className="pf-pixel pf-pixel-small" style={showDot ? { background: accentColor2 } : {}} />
                 <span>Dot</span>
+              </button>
+              <button
+                onClick={function () { setTrails(!trails); }}
+                className={"pf-pill" + (trails ? " active" : "")}
+                title="Toggle pixel trails"
+              >
+                <span className="pf-pixel pf-pixel-small" style={trails ? { background: accentColor } : {}} />
+                <span>Trails</span>
+              </button>
+              <button
+                onClick={function () { audioEnabled ? disableAudio() : enableAudio(); }}
+                className={"pf-pill" + (audioEnabled ? " active" : "")}
+                title={audioEnabled ? "Disable audio reactive" : "Enable audio reactive (mic)"}
+              >
+                <span className="pf-pixel pf-pixel-small" style={audioEnabled ? { background: accentColor2, boxShadow: "0 0 8px " + accentColor2 } : {}} />
+                <span>{audioError ? "Audio ⚠" : "Audio"}</span>
               </button>
             </div>
           </div>
@@ -1233,11 +2015,11 @@ if (isMobile && navigator.canShare) {
 
               <div className="pf-modal-row">
                 <span className="pf-modal-label">Flow</span>
-                <span className="pf-modal-value">5 modes · Waves, Spiral, Rain, Breathe, Chaos</span>
+                <span className="pf-modal-value">8 modes · Waves, Spiral, Rain, Breathe, Chaos, Vortex, Pulse, Drift</span>
               </div>
               <div className="pf-modal-row">
                 <span className="pf-modal-label">Touch</span>
-                <span className="pf-modal-value">5 modes · Ripple, Scatter, Bloom, Magnet, Glow</span>
+                <span className="pf-modal-value">7 modes · Ripple, Scatter, Bloom, Magnet, Glow, Repel, Trail</span>
               </div>
               <div className="pf-modal-row">
                 <span className="pf-modal-label">Render</span>
@@ -1254,6 +2036,128 @@ if (isMobile && navigator.canShare) {
             <div className="pf-modal-foot">
               Created by Ashlen Singh 2026.
             </div>
+          </div>
+        </div>
+      )}
+
+      {showCustomPalette && (
+        <div className="pf-modal-backdrop" onClick={function () { setShowCustomPalette(false); }}>
+          <div className="pf-modal" onClick={function (e) { e.stopPropagation(); }}>
+            <div className="pf-modal-header">
+              <div>
+                <div className="pf-modal-title">CUSTOM PALETTE</div>
+                <div className="pf-modal-author">Tap a swatch to edit · auto-saved</div>
+              </div>
+              <button onClick={function () { setShowCustomPalette(false); }} className="pf-icon-btn" aria-label="Close">×</button>
+            </div>
+
+            <div className="pf-cp-label">Colors</div>
+            <div className="pf-cp-grid">
+              {customColors.map(function (c, i) {
+                return (
+                  <label key={i} className="pf-cp-swatch-wrap">
+                    <input
+                      type="color"
+                      value={c}
+                      onChange={function (e) {
+                        const next = customColors.slice();
+                        next[i] = e.target.value;
+                        setCustomColors(next);
+                      }}
+                      className="pf-cp-input"
+                    />
+                    <span className="pf-cp-swatch" style={{ background: c }} />
+                    <span className="pf-cp-hex">{c.toUpperCase()}</span>
+                  </label>
+                );
+              })}
+            </div>
+
+            <div className="pf-cp-label" style={{ marginTop: 14 }}>Background</div>
+            <label className="pf-cp-swatch-wrap pf-cp-bg-wrap">
+              <input
+                type="color"
+                value={customBg}
+                onChange={function (e) { setCustomBg(e.target.value); }}
+                className="pf-cp-input"
+              />
+              <span className="pf-cp-swatch pf-cp-bg-swatch" style={{ background: customBg }} />
+              <span className="pf-cp-hex">{customBg.toUpperCase()}</span>
+            </label>
+
+            <label className="pf-cp-import">
+              <input
+                type="file"
+                accept="image/*"
+                onChange={handleImageImport}
+                style={{ display: "none" }}
+              />
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 8 }}>
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <polyline points="21 15 16 10 5 21" />
+              </svg>
+              Import from Image
+            </label>
+
+            <div className="pf-cp-actions">
+              <button
+                onClick={function () {
+                  setCustomColors(["#7B2D8E", "#9B4DCA", "#E8735A", "#F4A261", "#F28482", "#D4A5FF"]);
+                  setCustomBg("#0A0714");
+                }}
+                className="pf-dl-toggle"
+                style={{ flex: "0 0 auto" }}
+              >
+                Reset
+              </button>
+              <button
+                onClick={function () {
+                  setPalette("Custom");
+                  setShowCustomPalette(false);
+                }}
+                className="pf-dl-btn"
+                style={{ flex: 1 }}
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showPresets && (
+        <div className="pf-modal-backdrop" onClick={function () { setShowPresets(false); }}>
+          <div className="pf-modal" onClick={function (e) { e.stopPropagation(); }}>
+            <div className="pf-modal-header">
+              <div>
+                <div className="pf-modal-title">PRESETS</div>
+                <div className="pf-modal-author">Curated combos · tap to load</div>
+              </div>
+              <button onClick={function () { setShowPresets(false); }} className="pf-icon-btn" aria-label="Close">×</button>
+            </div>
+            <div className="pf-presets-grid">
+              {PRESETS.map(function (preset) {
+                return (
+                  <button
+                    key={preset.name}
+                    onClick={function () { applyPreset(preset); }}
+                    className="pf-preset-card"
+                  >
+                    <div className="pf-preset-swatches">
+                      {PALETTES[preset.palette].hex.slice(0, 4).map(function (c, i) {
+                        return <span key={i} className="pf-preset-swatch" style={{ background: c }} />;
+                      })}
+                    </div>
+                    <div className="pf-preset-name">{preset.name}</div>
+                    <div className="pf-preset-meta">{preset.flowMode} · {preset.renderMode}</div>
+                  </button>
+                );
+              })}
+            </div>
+            <button onClick={copyShareLink} className="pf-dl-btn" style={{ marginTop: 14 }}>
+              {shareLinkCopied ? "✓ Link Copied" : "Copy Share Link"}
+            </button>
           </div>
         </div>
       )}
@@ -1306,8 +2210,29 @@ if (isMobile && navigator.canShare) {
               </button>
             </div>
 
+            <div className="pf-dl-card">
+              <div className="pf-dl-card-head">
+                <div className="pf-dl-card-title">Video Loop</div>
+                <div className="pf-dl-card-sub">5 seconds · WebM · 60fps</div>
+              </div>
+              {isRecording && (
+                <div className="pf-dl-progress-wrap">
+                  <div className="pf-dl-progress-bar" style={{ width: (recordProgress * 100) + "%" }} />
+                  <div className="pf-dl-progress-label">Recording {Math.ceil(5 - recordProgress * 5)}s</div>
+                </div>
+              )}
+              <button
+                onClick={handleRecordVideo}
+                disabled={isRecording}
+                className="pf-dl-btn"
+                style={{ opacity: isRecording ? 0.5 : 1, cursor: isRecording ? "wait" : "pointer" }}
+              >
+                {isRecording ? "Recording..." : "Record 5s WebM"}
+              </button>
+            </div>
+
             <div className="pf-modal-foot">
-              Video loop export coming soon.
+              Video loops record current canvas at 60fps.
             </div>
           </div>
         </div>
@@ -1319,6 +2244,7 @@ if (isMobile && navigator.canShare) {
         .pf-root {
           width: 100vw;
           height: 100vh;
+          height: 100dvh;
           overflow: hidden;
           background: #000;
           position: relative;
@@ -1403,6 +2329,11 @@ if (isMobile && navigator.canShare) {
           color: #fff;
         }
         .pf-icon-btn:active { transform: scale(0.94); }
+        .pf-icon-btn-active {
+          background: rgba(255,255,255,0.15);
+          border-color: rgba(255,255,255,0.5);
+          color: #fff;
+        }
 
         .pf-controls {
           position: absolute;
@@ -1421,8 +2352,11 @@ if (isMobile && navigator.canShare) {
           flex-direction: column;
           gap: 12px;
           animation: pfFadeUp 0.5s ease-out;
-          max-height: calc(100vh - 100px);
+          max-height: 70dvh;
           overflow-y: auto;
+          overscroll-behavior: contain;
+          -webkit-overflow-scrolling: touch;
+          padding-bottom: calc(14px + env(safe-area-inset-bottom));
         }
         @keyframes pfFadeUp {
           from { opacity: 0; transform: translateY(20px); }
@@ -1597,6 +2531,10 @@ if (isMobile && navigator.canShare) {
         .pf-modal {
           width: 100%;
           max-width: 380px;
+          max-height: 85dvh;
+          overflow-y: auto;
+          overscroll-behavior: contain;
+          -webkit-overflow-scrolling: touch;
           background: rgba(14,14,18,0.92);
           border: 1px solid rgba(255,255,255,0.1);
           border-radius: 20px;
@@ -1783,6 +2721,183 @@ if (isMobile && navigator.canShare) {
         }
         .pf-dl-btn:active {
           transform: translateY(0);
+        }
+
+        /* Video record progress */
+        .pf-dl-progress-wrap {
+          position: relative;
+          height: 28px;
+          background: rgba(255,255,255,0.06);
+          border: 1px solid rgba(255,255,255,0.1);
+          border-radius: 8px;
+          margin-bottom: 10px;
+          overflow: hidden;
+        }
+        .pf-dl-progress-bar {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(90deg, rgba(255,255,255,0.4), rgba(255,255,255,0.7));
+          transition: width 0.1s linear;
+        }
+        .pf-dl-progress-label {
+          position: relative;
+          z-index: 1;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-family: var(--font-geist-mono), ui-monospace, monospace;
+          font-size: 10.5px;
+          font-weight: 600;
+          color: #000;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+        }
+
+        /* Custom palette builder */
+        .pf-cp-label {
+          font-family: var(--font-geist-mono), ui-monospace, monospace;
+          font-size: 9.5px;
+          font-weight: 500;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
+          color: rgba(255,255,255,0.4);
+          margin-bottom: 8px;
+        }
+        .pf-cp-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr 1fr;
+          gap: 8px;
+        }
+        .pf-cp-swatch-wrap {
+          position: relative;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 6px;
+          padding: 10px;
+          background: rgba(255,255,255,0.03);
+          border: 1px solid rgba(255,255,255,0.07);
+          border-radius: 10px;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+        .pf-cp-swatch-wrap:hover {
+          background: rgba(255,255,255,0.06);
+          border-color: rgba(255,255,255,0.2);
+        }
+        .pf-cp-bg-wrap {
+          flex-direction: row;
+          justify-content: flex-start;
+          padding: 12px;
+        }
+        .pf-cp-input {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          opacity: 0;
+          cursor: pointer;
+          border: none;
+          background: transparent;
+        }
+        .pf-cp-swatch {
+          width: 36px;
+          height: 36px;
+          border-radius: 8px;
+          border: 1px solid rgba(255,255,255,0.1);
+          pointer-events: none;
+        }
+        .pf-cp-bg-swatch {
+          width: 28px;
+          height: 28px;
+          margin-right: 10px;
+        }
+        .pf-cp-hex {
+          font-family: var(--font-geist-mono), ui-monospace, monospace;
+          font-size: 9px;
+          color: rgba(255,255,255,0.6);
+          letter-spacing: 0.06em;
+          pointer-events: none;
+        }
+        .pf-cp-actions {
+          display: flex;
+          gap: 8px;
+          margin-top: 12px;
+        }
+        .pf-cp-import {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin-top: 16px;
+          padding: 11px 14px;
+          background: rgba(255,255,255,0.06);
+          border: 1px dashed rgba(255,255,255,0.2);
+          color: rgba(255,255,255,0.85);
+          border-radius: 10px;
+          font-family: var(--font-geist-mono), ui-monospace, monospace;
+          font-size: 10.5px;
+          font-weight: 500;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+        .pf-cp-import:hover {
+          background: rgba(255,255,255,0.1);
+          border-color: rgba(255,255,255,0.4);
+        }
+        .pf-cp-import:active { transform: scale(0.98); }
+
+        /* Presets grid */
+        .pf-presets-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+          margin-top: 4px;
+        }
+        .pf-preset-card {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          padding: 12px;
+          background: rgba(255,255,255,0.03);
+          border: 1px solid rgba(255,255,255,0.07);
+          border-radius: 10px;
+          cursor: pointer;
+          transition: all 0.2s;
+          text-align: left;
+        }
+        .pf-preset-card:hover {
+          background: rgba(255,255,255,0.06);
+          border-color: rgba(255,255,255,0.2);
+          transform: translateY(-1px);
+        }
+        .pf-preset-card:active { transform: scale(0.98); }
+        .pf-preset-swatches {
+          display: flex;
+          gap: 2px;
+          margin-bottom: 2px;
+        }
+        .pf-preset-swatch {
+          flex: 1;
+          height: 16px;
+          border-radius: 3px;
+        }
+        .pf-preset-name {
+          font-family: var(--font-geist-mono), ui-monospace, monospace;
+          font-size: 11px;
+          font-weight: 600;
+          color: #fff;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+        }
+        .pf-preset-meta {
+          font-family: var(--font-geist-mono), ui-monospace, monospace;
+          font-size: 9px;
+          color: rgba(255,255,255,0.45);
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
         }
       `}</style>
     </div>
